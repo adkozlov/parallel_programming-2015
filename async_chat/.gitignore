@@ -1,0 +1,9 @@
+.idea/.name
+.idea/copyright
+.idea/encodings.xml
+.idea/workspace.xml
+.idea/uiDesigner.xml
+
+/out/
+
+/commons/src/java_gen/
