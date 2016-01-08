@@ -9,20 +9,22 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.nio.channels.AsynchronousSocketChannel;
-import java.nio.channels.ClosedChannelException;
 import java.util.concurrent.ExecutionException;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static ru.spbau.chat.commons.IOUtils.handleError;
 import static ru.spbau.chat.commons.ReadCompletionHandler.submitReadTask;
 import static ru.spbau.chat.commons.WriteCompletionHandler.submitWriteTask;
+import static ru.spbau.chat.commons.protocol.ChatProtocol.Message.newBuilder;
 
 /**
  * @author adkozlov
  */
 public class Client implements Closeable {
 
+    private static final @NotNull Logger LOGGER = Logger.getLogger(Client.class.getName());
     private static final @NotNull Pattern COMMAND_REGEX = Pattern.compile("^command\\s");
 
     private final @NotNull AsynchronousSocketChannel socketChannel = AsynchronousSocketChannel.open();
@@ -35,6 +37,7 @@ public class Client implements Closeable {
         socketChannel.connect(new InetSocketAddress(host, port)).get();
 
         submitReadTask(socketChannel,
+                throwable -> LOGGER.log(Level.SEVERE, "read message error", throwable),
                 message -> {
                     switch (message.getType()) {
                         case MESSAGE:
@@ -42,8 +45,8 @@ public class Client implements Closeable {
                         default:
                             message.getTextList().forEach(System.out::println);
                     }
-                },
-                result -> handleError(new ClosedChannelException()));
+                }
+        );
     }
 
     @Override
@@ -52,14 +55,14 @@ public class Client implements Closeable {
     }
 
     public void writeMessage(@NotNull String text) {
-        submitWriteTask(socketChannel, buildMessage(text));
+        submitWriteTask(socketChannel, buildMessage(text),
+                throwable -> LOGGER.log(Level.SEVERE, "send message error", throwable));
     }
 
     private @NotNull ChatProtocol.Message buildMessage(@NotNull String text) {
         Matcher matcher = COMMAND_REGEX.matcher(text);
         boolean isCommand = matcher.find();
-
-        return ChatProtocol.Message.newBuilder()
+        return newBuilder()
                 .setType(isCommand ? ChatProtocol.Message.Type.COMMAND : ChatProtocol.Message.Type.MESSAGE)
                 .addText(isCommand ? matcher.replaceFirst("") : text)
                 .setAuthor(author)
@@ -76,7 +79,7 @@ public class Client implements Closeable {
              BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(System.in))) {
             bufferedReader.lines().forEach(client::writeMessage);
         } catch (IOException | ExecutionException | InterruptedException e) {
-            handleError(e);
+            LOGGER.log(Level.SEVERE, "client is closed", e);
         } catch (NumberFormatException e) {
             printUsage();
         }

@@ -4,31 +4,34 @@ import com.google.protobuf.ProtocolStringList;
 import org.jetbrains.annotations.NotNull;
 import ru.spbau.chat.commons.protocol.ChatProtocol;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
-import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousChannelGroup;
 import java.nio.channels.AsynchronousServerSocketChannel;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
-import static ru.spbau.chat.commons.IOUtils.handleError;
-import static ru.spbau.chat.commons.IOUtils.toByteBuffer;
 import static ru.spbau.chat.commons.ReadCompletionHandler.submitReadTask;
 import static ru.spbau.chat.commons.WriteCompletionHandler.submitWriteTask;
+import static ru.spbau.chat.commons.protocol.ChatProtocol.Message.newBuilder;
 
 /**
  * @author adkozlov
  */
 public class Server implements Closeable {
+
+    private static final @NotNull Logger LOGGER = Logger.getLogger(Server.class.getName());
 
     private final @NotNull AsynchronousChannelGroup channelGroup;
     private final @NotNull AsynchronousServerSocketChannel serverSocketChannel;
@@ -51,64 +54,63 @@ public class Server implements Closeable {
 
     public void accept() {
         try {
-            AsynchronousSocketChannel socketChannel = serverSocketChannel.accept().get();
-            socketChannels.put(socketChannel, System.currentTimeMillis());
+            AsynchronousSocketChannel channel = serverSocketChannel.accept().get();
+            socketChannels.put(channel, System.currentTimeMillis());
 
-            submitReadTask(socketChannel,
+            submitReadTask(channel,
+                    throwable -> socketChannels.remove(channel),
                     message -> {
                         switch (message.getType()) {
                             case MESSAGE:
-                                broadcastMessage(message, socketChannel);
+                                broadcastMessage(message, channel);
                                 break;
                             case COMMAND:
-                                handleCommand(message.getTextList(), socketChannel);
+                                handleCommand(message.getTextList(), channel);
                                 break;
                         }
-                    },
-                    result -> socketChannels.remove(socketChannel));
+                    }
+            );
         } catch (InterruptedException | ExecutionException e) {
-            handleError(e);
+            LOGGER.log(Level.SEVERE, "channel is not open", e);
         }
     }
 
     private void broadcastMessage(@NotNull ChatProtocol.Message message,
                                   @NotNull AsynchronousSocketChannel filter) {
-        ByteBuffer buffer = toByteBuffer(message);
         socketChannels.entrySet().stream()
-                .map(Map.Entry::getKey)
+                .map(ConcurrentHashMap.Entry::getKey)
                 .filter(channel -> !channel.equals(filter))
-                .forEach(channel -> submitWriteTask(channel, buffer));
+                .forEach(channel -> sendMessage(message, channel));
     }
 
-    private void handleCommand(@NotNull ProtocolStringList command, @NotNull AsynchronousSocketChannel socketChannel) {
+    private void handleCommand(@NotNull ProtocolStringList command, @NotNull AsynchronousSocketChannel channel) {
         StringBuilder stringBuilder = new StringBuilder();
         command.forEach(line -> stringBuilder.append(line).append(System.lineSeparator()));
 
-        executorService.submit(() -> {
-            List<String> text = new ArrayList<>();
-            try {
-                Process process = Runtime.getRuntime().exec(stringBuilder.toString());
-                process.waitFor();
-                text.addAll(lines(process.getInputStream()));
-            } catch (IOException | InterruptedException e) {
-                text.add(e.getMessage());
-            } finally {
-                submitWriteTask(socketChannel, buildMessage(text));
+        executorService.submit(() -> sendMessage(newBuilder()
+                        .setType(ChatProtocol.Message.Type.COMMAND)
+                        .addAllText(execute(stringBuilder.toString()))
+                        .build(),
+                channel));
+    }
+
+    public static @NotNull List<String> execute(@NotNull String command) {
+        List<String> result = new ArrayList<>();
+        try {
+            Process process = Runtime.getRuntime().exec(command);
+            process.waitFor();
+
+            try (BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                bufferedReader.lines().forEach(result::add);
             }
-        });
-    }
-
-    private static @NotNull ChatProtocol.Message buildMessage(@NotNull List<String> text) {
-        return ChatProtocol.Message.newBuilder()
-                .setType(ChatProtocol.Message.Type.COMMAND)
-                .addAllText(text)
-                .build();
-    }
-
-    private static @NotNull List<String> lines(@NotNull InputStream inputStream) throws IOException {
-        try (BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream))) {
-            return bufferedReader.lines().collect(Collectors.toList());
+        } catch (IOException | InterruptedException e) {
+            result.add(e.getMessage());
         }
+        return result;
+    }
+
+    private static void sendMessage(@NotNull ChatProtocol.Message message, @NotNull AsynchronousSocketChannel channel) {
+        submitWriteTask(channel, message, throwable -> LOGGER.log(Level.SEVERE, "send message error", throwable));
     }
 
     public static void main(@NotNull String[] args) {
@@ -122,7 +124,7 @@ public class Server implements Closeable {
                 server.accept();
             }
         } catch (IOException e) {
-            handleError(e);
+            LOGGER.log(Level.SEVERE, "server is closed", e);
         } catch (NumberFormatException e) {
             printUsage();
         }
