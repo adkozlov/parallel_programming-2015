@@ -77,10 +77,9 @@ public class Server implements Closeable {
 
     private void broadcastMessage(@NotNull ChatProtocol.Message message,
                                   @NotNull AsynchronousSocketChannel filter) {
-        socketChannels.entrySet().stream()
-                .map(ConcurrentHashMap.Entry::getKey)
-                .filter(channel -> !channel.equals(filter))
-                .forEach(channel -> sendMessage(message, channel));
+        socketChannels.forEachKey(1,
+                channel -> !channel.equals(filter) ? channel : null,
+                channel -> sendMessage(message, channel));
     }
 
     private void handleCommand(@NotNull ProtocolStringList command, @NotNull AsynchronousSocketChannel channel) {
